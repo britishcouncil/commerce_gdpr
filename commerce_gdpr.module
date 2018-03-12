@@ -1,0 +1,711 @@
+<?php
+
+/**
+ * @file
+ * Main module file.
+ */
+
+require_once __DIR__ . '/commerce_gdpr.user.inc';
+
+/**
+ * Get information about anonymized entity properties.
+ *
+ * @param string $type
+ *   Entity type ID.
+ *
+ * @return array
+ *   Array of anonymization information for entity properties
+ *   or information for all entity types if $type was not provided.
+ */
+function _commerce_gdpr_get_entity_property_info($type = NULL) {
+
+  // Use static storage, as this can be executed multiple times in one request.
+  $entity_property_info = &drupal_static(__FUNCTION__);
+
+  if (!isset($entity_property_info)) {
+    $entity_property_info = array(
+      'user' => array(
+        'name' => array(
+          'type' => 'hash',
+          'max_length' => 60,
+        ),
+        'mail' => array(
+          'type' => 'hash',
+          'max_length' => 254,
+        ),
+        'signature' => array(
+          'type' => 'hash',
+          'max_length' => 255,
+        ),
+        'data' => array(
+          'type' => 'clear',
+        ),
+        // Also disable the user account.
+        'status' => array(
+          'type' => 'value',
+          'value' => 0,
+        ),
+      ),
+
+      'commerce_order' => array(
+        'mail' => array(
+          'type' => 'hash',
+          'max_length' => 255,
+        ),
+        'hostname' => array(
+          'type' => 'hash',
+          'max_length' => 255,
+        ),
+        // NOTE: revision_hostname is always populated automatically
+        // by CommerceOrderEntityController::save(), we can't overwrite
+        // this value.
+        'data' => array(
+          'type' => 'clear',
+        ),
+      ),
+    );
+
+    drupal_alter('commerce_gdpr_entity_property_info', $entity_property_info);
+
+    // We can't save commerce_customer_profile without it being duplicated
+    // by commerce so modifying its properties is out of question.
+    $entity_property_info['commerce_customer_profile'] = array();
+  }
+
+  if (isset($type)) {
+    return $entity_property_info[$type];
+  }
+  else {
+    return $entity_property_info;
+  }
+}
+
+/**
+ * Implements hook_help().
+ */
+function commerce_gdpr_help($path, $arg) {
+  if ($path === 'admin/help#commerce_gdpr') {
+    $filepath = dirname(__FILE__) . '/README.txt';
+    if (file_exists($filepath)) {
+      $readme = file_get_contents($filepath);
+      if (module_exists('markdown')) {
+        $filters = module_invoke('markdown', 'filter_info');
+        $info = $filters['filter_markdown'];
+
+        if (function_exists($info['process callback'])) {
+          $output = $info['process callback']($readme, NULL);
+        }
+        else {
+          $output = '<pre>' . $readme . '</pre>';
+        }
+      }
+      else {
+        $output = '<pre>' . $readme . '</pre>';
+      }
+
+      // Add a list of supported hash_hmac algorithms.
+      if (function_exists('hash_hmac_algos')) {
+        // As of PHP 7.2+.
+        $hash_hmac_algos = hash_hmac_algos();
+      }
+      else {
+        // Before PHP 7.2.
+        // It may be that some of the algos may not be suitable for hash_hmac
+        // (see http://php.net/manual/en/function.hash-hmac-algos.php)
+        // although it' possibly a rare case.
+        $hash_hmac_algos = hash_algos();
+      }
+      $renderable = array(
+        '#theme' => 'item_list',
+        '#title' => 'Supported hashing algorithms:',
+        '#items' => $hash_hmac_algos,
+      );
+      $output .= drupal_render($renderable);
+
+      return $output;
+    }
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function commerce_gdpr_permission() {
+  return array(
+    'administer commerce gdpr' => array(
+      'title' => t('Administer commerce GDPR'),
+    ),
+    'anonymize other users data' => array(
+      'title' => t('Anonymize data of other users'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_gdpr_menu() {
+  $items = array();
+
+  $items['admin/commerce/config/commerce-gdpr'] = array(
+    'title' => 'Commerce GDPR',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_gdpr_admin_form'),
+    'access arguments' => array('administer commerce gdpr'),
+    'file' => 'commerce_gdpr.admin.inc',
+  );
+
+  $items['admin/people/commerce-gdpr-confirm'] = array(
+    'title' => 'Confirm bulk anonymization',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_gdpr_user_bulk_confirm_form'),
+    'access arguments' => array('anonymize other users data'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * One-way string hashing.
+ *
+ * @param mixed $value
+ *   The anonymized value: a string or a numeric type.
+ * @param array $params
+ *   Parameters describing how anonymization should be performed.
+ */
+function commerce_gdpr_anonymize_value($value, array $params = array()) {
+  $hashing_params = &drupal_static(__FUNCTION__);
+  $output = NULL;
+
+  switch ($params['type']) {
+    case 'hash':
+      if (!isset($hashing_params)) {
+        $hashing_params = array(
+          'salt' => variable_get('commerce_gdpr_salt', $GLOBALS['drupal_hash_salt']),
+          'algo' => variable_get('commerce_gdpr_algo', 'md5'),
+        );
+      }
+      $output = hash_hmac($hashing_params['algo'], $value, $hashing_params['salt']);
+      break;
+
+    case 'value':
+      if (isset($params['value'])) {
+        $output = $params['value'];
+      }
+      break;
+
+    case 'clear':
+      if (is_numeric($value)) {
+        $output = 0;
+      }
+      else {
+        $output = '';
+      }
+      break;
+  }
+
+  // Shorten the optput to maximum allowable length if required.
+  if (!empty($params['max_length']) && is_string($output) && (strlen($output) > $params['max_length'])) {
+    $output = substr($output, 0, $params['max_length']);
+  }
+
+  return $output;
+}
+
+/**
+ * Update last updated information of an entity.
+ *
+ * @param string $type
+ *   Entity type.
+ * @param int $id
+ *   Entity ID.
+ * @param int $time
+ *   Timestamp of last entity update. 0 means that the entity
+ *   has already been anonymized.
+ */
+function _commerce_gdpr_update_info($type, $id, $time = REQUEST_TIME) {
+
+  // Always skip user 1 and user 0.
+  if ($type === 'user' && ($id == 1 || $id == 0)) {
+    return;
+  }
+
+  // Act only if the entity hasn't been anonymized yet.
+  $last_access = _commerce_gdpr_get_info($type, $id);
+  if ($last_access !== 0) {
+    $key = array(
+      'type' => $type,
+      'id' => $id,
+    );
+    db_merge('commerce_gdpr_access')
+      ->key($key)
+      ->fields($key + ['last_access' => $time])
+      ->execute();
+  }
+}
+
+/**
+ * Delete last updated information of an entity.
+ *
+ * @param string $type
+ *   Entity type.
+ * @param int $id
+ *   Entity ID.
+ */
+function _commerce_gdpr_delete_info($type, $id) {
+  db_delete('commerce_gdpr_access')
+    ->condition('type', $type)
+    ->condition('id', $id)
+    ->execute();
+}
+
+/**
+ * Get last updated information of an entity.
+ *
+ * @param string $type
+ *   Entity type.
+ * @param int $id
+ *   Entity ID.
+ *
+ * @return mixed
+ *   An array of last access data keyed by entity type and id or a single
+ *   last access timestamp if type and id conditions have been provided.
+ */
+function _commerce_gdpr_get_info($type = NULL, $id = NULL) {
+  $query = db_select('commerce_gdpr_access', 'cga');
+  if (isset($type) && isset($id)) {
+    $query->fields('cga', array('last_access'));
+    if (isset($type)) {
+      $query->condition('type', $type);
+    }
+    if (isset($id)) {
+      $query->condition('id', $id);
+    }
+    $last_access = $query->execute()->fetchField();
+    return $last_access === FALSE ? FALSE : intval($last_access);
+  }
+  else {
+    $query->fields('cga');
+    if (isset($type)) {
+      $query->condition('type', $type);
+    }
+    if (isset($id)) {
+      $query->condition('id', $id);
+    }
+    $results = $query->execute()->fetchAll(PDO::FETCH_ASSOC);
+    $output = array();
+    foreach ($results as $item) {
+      $output[$item['type']][$item['id']] = intval($item['last_access']);
+    }
+    return $output;
+  }
+
+}
+
+/**
+ * Update last update information using core and commerce hooks.
+ */
+
+/**
+ * Implemens hook_entity_insert().
+ */
+function commerce_gdpr_entity_insert($entity, $type) {
+  commerce_gdpr_entity_update($entity, $type);
+}
+
+/**
+ * Helper hunction that gets all profiles and orders associated with a user.
+ */
+function _commerce_gdpr_get_user_queue_items($account) {
+  $queue_items = array();
+
+  // First check if the user wasn't anonymized before.
+  // Use the anonymized user email as an identifier.
+  $user_property_info = _commerce_gdpr_get_entity_property_info('user');
+  $anonymized_mail = commerce_gdpr_anonymize_value($account->mail, $user_property_info['mail']);
+  $uid = db_select('users', 'u')
+    ->fields('u', array('uid'))
+    ->condition('mail', $anonymized_mail)
+    ->execute()
+    ->fetchField();
+
+  // Also check the user name that has to be unique.
+  // If a user with the same name but different email existed, change the
+  // currently anonymized user name.
+  if ($uid === FALSE) {
+    $name_base = $account->name;
+    $iteration = 0;
+    do {
+      $anonymized_username = commerce_gdpr_anonymize_value($account->name, $user_property_info['name']);
+
+      $check = db_select('users', 'u')
+        ->fields('u', array('uid'))
+        ->condition('name', $anonymized_username)
+        ->condition('uid', $account->uid, '<>')
+        ->execute()
+        ->fetchField();
+      if ($check) {
+        $account->name = $name_base . '_' . ($iteration++);
+      }
+    } while ($check);
+
+    if ($name_base !== $account->name) {
+      user_save($account);
+    }
+  }
+
+  // Get orders.
+  $orders = commerce_order_load_multiple(array(), array('uid' => $account->uid));
+  foreach ($orders as $order) {
+    if (empty($order->anonymized)) {
+      $queue_items[] = array(
+        'type' => 'commerce_order',
+        'id' => $order->order_id,
+        'uid' => $uid,
+      );
+    }
+  }
+
+  // Get profiles.
+  $profiles = commerce_customer_profile_load_multiple(array(), array('uid' => $account->uid));
+  foreach ($profiles as $profile) {
+    if (empty($profile->anonymized)) {
+      $queue_items[] = array(
+        'type' => 'commerce_customer_profile',
+        'id' => $profile->profile_id,
+        'uid' => $uid,
+      );
+    }
+  }
+
+  // Last item: delete or anonymize the user account.
+  if ($uid) {
+    $queue_items[] = array(
+      'type' => 'user',
+      'id' => $account->uid,
+      'delete' => TRUE,
+    );
+  }
+  elseif ($account->uid !== 1) {
+    if (empty($account->anonymized)) {
+      $queue_items[] = array(
+        'type' => 'user',
+        'id' => $account->uid,
+      );
+    }
+  }
+
+  return $queue_items;
+}
+
+/**
+ * Implemens hook_entity_update().
+ */
+function commerce_gdpr_entity_update($entity, $type) {
+  if (!in_array($type, array_keys(_commerce_gdpr_get_entity_property_info())) || !empty($entity->commerce_gdpr_anonymization)) {
+    return;
+  }
+
+  // Update the last access of the entity owner if not owned by an anonymous
+  // user.
+  if (isset($entity->uid) && !empty($entity->uid)) {
+    _commerce_gdpr_update_info('user', $entity->uid);
+  }
+  else {
+    list($id,,) = entity_extract_ids($type, $entity);
+    _commerce_gdpr_update_info($type, $id);
+  }
+}
+
+/**
+ * Implemens hook_entity_delete().
+ */
+function commerce_gdpr_entity_delete($entity, $type) {
+  if (!in_array($type, array_keys(_commerce_gdpr_get_entity_property_info()))) {
+    return;
+  }
+
+  list($id,,) = entity_extract_ids($type, $entity);
+  _commerce_gdpr_delete_info($type, $id);
+}
+
+/**
+ * Implements hook_entity_view().
+ */
+function commerce_gdpr_entity_load($entities, $type) {
+  if (!in_array($type, array_keys(_commerce_gdpr_get_entity_property_info()))) {
+    return;
+  }
+
+  $ids = array();
+  foreach ($entities as $id => $entity) {
+    $ids[] = $id;
+  }
+  $query = db_select('commerce_gdpr_access', 'cga');
+  $query->fields('cga', array('id', 'last_access'));
+  $query->condition('type', $type);
+  $query->condition('id', $ids);
+  $last_access_data = $query->execute()->fetchAllKeyed();
+  foreach ($last_access_data as $id => $last_access) {
+    if ($last_access == 0) {
+      $entities[$id]->anonymized = TRUE;
+    }
+  }
+
+}
+
+/**
+ * Implemens hook_user_login().
+ */
+function commerce_gdpr_user_login(&$edit, $account) {
+  // Refresh user orders and profiles access on every user login.
+  $orders = commerce_order_load_multiple(array(), array('uid' => $account->uid));
+  foreach ($orders as $order) {
+    commerce_gdpr_entity_update($order, 'commerce_order');
+  }
+
+  _commerce_gdpr_update_info('user', $account->uid);
+}
+
+/**
+ * Data anonymization function.
+ *
+ * Anonymizes an entity and all its revisions, if any.
+ *
+ * @param string $type
+ *   Entity type.
+ * @param object $entity
+ *   Drupal entity.
+ * @param array $field_data
+ *   Array of field anonymization data.
+ * @param bool $is_default_revision
+ *   Is this the default revision of an entity? Internal use only.
+ * @param bool $force
+ *   If set to TRUE, entity will be anonymized even if
+ *   it is already marked as anonymized.
+ */
+function commerce_gdpr_anonymize_entity($type, $entity, array $field_data = NULL, $is_default_revision = TRUE, $force = FALSE) {
+  list($id, $vid, $bundle) = entity_extract_ids($type, $entity);
+
+  // Set commerce_gdpr parameter to prevent executing other module hooks.
+  $entity->commerce_gdpr_anonymization = TRUE;
+
+  // Check if the entity is already anonymized.
+  if (!$force) {
+    $last_access = _commerce_gdpr_get_info($type, $id);
+    if ($last_access === 0) {
+      return;
+    }
+  }
+
+  $entity_info = entity_get_info($type);
+
+  // Get anonymized fields and properties data.
+  if (!isset($field_data)) {
+    $fields = variable_get('commerce_gdpr_anonymized_fields', array());
+    $field_data = isset($fields[$type][$bundle]) ? $fields[$type][$bundle] : array();
+  }
+  $properties_data = _commerce_gdpr_get_entity_property_info($type);
+
+  // Go for entity revisions first. NOTE: Why is there no API to
+  // load all revisions?
+  if ($is_default_revision) {
+
+    // Allow other modules do their job.
+    module_invoke_all('commerce_gdpr_entity_anonymization', $type, $entity, $properties_data, $field_data);
+
+    if (!empty($entity_info['revision table'])) {
+      $revision_ids = db_select($entity_info['revision table'], 'revision')
+        ->fields('revision', array($entity_info['entity keys']['revision']))
+        ->condition('revision.' . $entity_info['entity keys']['id'], $id)
+        ->condition('revision.' . $entity_info['entity keys']['revision'], $vid, '<>')
+        ->execute()
+        ->fetchCol();
+
+      foreach ($revision_ids as $revision_id) {
+        $revisions = entity_get_controller($type)->load(FALSE, array(
+          $entity_info['entity keys']['revision'] => $revision_id,
+        ));
+        $revision = reset($revisions);
+        commerce_gdpr_anonymize_entity($type, $revision, $field_data, FALSE, $force);
+      }
+    }
+  }
+
+  // TODO: Are there any other data types that should be subject to
+  // anonymization? Other data types will be cleared.
+  $hashed_data_types = array(
+    'char',
+    'varchar',
+  );
+
+  $updated = FALSE;
+
+  if (!empty($field_data)) {
+    $anonymization_data = array();
+    foreach ($field_data as $field_name) {
+      if (!empty($entity->{$field_name})) {
+
+        // Determine anonymization process parameters.
+        $field_info = field_info_field($field_name);
+        if (!empty($field_info['columns'])) {
+          foreach ($field_info['columns'] as $column => $spec) {
+            if (isset($spec['type'])) {
+              if (in_array($spec['type'], $hashed_data_types)) {
+                $anonymization_data[$field_name][$column] = array(
+                  'type' => 'hash',
+                  'max_length' => isset($spec['length']) ? $spec['length'] : 0,
+                );
+              }
+              else {
+                $anonymization_data[$field_name][$column] = array(
+                  'type' => 'clear',
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Anonymize field values.
+    if (!empty($anonymization_data)) {
+      $updated = TRUE;
+      foreach ($anonymization_data as $field_name => $column_data) {
+        foreach ($entity->{$field_name} as $langcode => $items) {
+          foreach ($items as $delta => $item) {
+            foreach ($item as $column => $value) {
+              if (isset($column_data[$column])) {
+                $entity->{$field_name}[$langcode][$delta][$column] = commerce_gdpr_anonymize_value($value, $column_data[$column]);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Anonymize entity properties.
+  if (!empty($properties_data)) {
+    $updated = TRUE;
+    foreach ($properties_data as $property => $property_data) {
+      if (!empty($entity->{$property})) {
+        $entity->{$property} = commerce_gdpr_anonymize_value($entity->{$property}, $property_data);
+      }
+    }
+    entity_metadata_wrapper($type, $entity)->save();
+  }
+
+  // If no properties have were changed, it's enough to save field
+  // values. Also a workaround for customer profile duplication.
+  elseif ($updated) {
+    field_attach_update($type, $entity);
+    if ($is_default_revision) {
+      entity_get_controller($type)->resetCache(array($id));
+    }
+  }
+
+  // Mark the entity as anonymized in db.
+  if ($is_default_revision) {
+    _commerce_gdpr_update_info($type, $id, 0);
+  }
+}
+
+/**
+ * Implements hook_user_operations().
+ */
+function commerce_gdpr_user_operations() {
+  if (user_access('anonymize other users data')) {
+    return array(
+      'anonymize' => array(
+        'label' => t('Anonymize the selected users data'),
+        'callback' => 'commerce_gdpr_user_operations_anonymize_router',
+      ),
+    );
+  }
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function commerce_gdpr_cron_queue_info() {
+  $queues['commerce_gdpr_anonymization'] = array(
+    'worker callback' => 'commerce_gdpr_anonymization_worker',
+    'time' => 30,
+  );
+  return $queues;
+}
+
+/**
+ * Queue worker callback.
+ */
+function commerce_gdpr_anonymization_worker($item) {
+
+  $entities = entity_get_controller($item['type'])->load(array($item['id']));
+  if (!empty($entities)) {
+    $entity = reset($entities);
+    if (!empty($item['delete'])) {
+      entity_metadata_wrapper($item['type'], $entity)->delete();
+    }
+    else {
+      commerce_gdpr_anonymize_entity($item['type'], $entity);
+
+      // Optionally change ownership of the entity.
+      if (!empty($item['uid'])) {
+        if ($item['type'] === 'commerce_customer_profile') {
+          db_update('commerce_customer_profile')
+            ->fields(array('uid' => $item['uid']))
+            ->condition('profile_id', $entity->profile_id)
+            ->execute();
+        }
+        else {
+          $entity->uid = $item['uid'];
+          entity_metadata_wrapper($item['type'], $entity)->save();
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function commerce_gdpr_cron() {
+  $data_retention = variable_get('commerce_gdpr_data_retention', 0);
+
+  if ($data_retention) {
+    $condition = REQUEST_TIME - $data_retention * 24 * 3600;
+    $results = db_select('commerce_gdpr_access', 'cga')
+      ->fields('cga')
+      ->condition('last_access', 0, '>')
+      ->condition('last_access', $condition, '<')
+      ->execute()
+      ->fetchAll(PDO::FETCH_ASSOC);
+
+    if (!empty($results)) {
+      $queue = DrupalQueue::get('commerce_gdpr_anonymization');
+
+      // Continue only if there are no items in the queue, otherwise we
+      // could end up processing same items multiple times.
+      if ($queue->numberOfItems() > 0) {
+        return;
+      }
+
+      // Add items to be processed in the next cron queue.
+      foreach ($results as $item) {
+        if ($item['type'] === 'user') {
+          $account = user_load($item['id']);
+          $items = _commerce_gdpr_get_user_queue_items($account);
+          foreach ($items as $item) {
+            $queue->createItem($item);
+          }
+        }
+        else {
+          $queue->createItem($item);
+        }
+      }
+    }
+  }
+}
