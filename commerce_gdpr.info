@@ -1,0 +1,12 @@
+name = Commerce GDPR
+description = Allows user and order data anonymization for complience with the GDPR EU directive.
+core = 7.x
+package = Commerce (contrib)
+configure = admin/commerce/config/commerce-gdpr
+dependencies[] = commerce:commerce
+dependencies[] = commerce:commerce_order
+dependencies[] = ctools:ctools
+files[] = commerce_gdpr.test
+
+test_dependencies[] = views:views
+test_dependencies[] = addressfield:addressfield

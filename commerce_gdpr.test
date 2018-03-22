@@ -1,0 +1,232 @@
+<?php
+
+/**
+ * @file
+ * Includes CommerceGdprUnitTestCase class.
+ */
+
+/**
+ * Includes tests for the most important functions of the module.
+ *
+ * @see DrupalUnitTestCase
+ *
+ * @ingroup commerce_gdpr
+ */
+class CommerceGdprUnitTestCase extends DrupalUnitTestCase {
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function getInfo() {
+    return array(
+      'name' => 'Commerce GDPR unit tests',
+      'description' => 'Test proper operation of key Commerce GPR functions.',
+      'group' => 'Drupal Commerce',
+    );
+  }
+
+  /**
+   * Set up the test environment.
+   *
+   * Note that we use drupal_load() instead of passing our module dependency
+   * to parent::setUp(). That's because we're using DrupalUnitTestCase, and
+   * thus we don't want to install the module, only load it's code.
+   *
+   * Also, DrupalUnitTestCase can't actually install modules. This is by
+   * design.
+   */
+  public function setUp() {
+    drupal_load('module', 'commerce_gdpr');
+    $GLOBALS['drupal_hash_salt'] = hash('md5', mt_rand());
+    parent::setUp();
+  }
+
+  /**
+   * Test commerce_gdpr_anonymize_value().
+   */
+  public function testAnonymizeValueFunction() {
+    $value = mt_rand();
+
+    $expected = hash_hmac('md5', $value, $GLOBALS['drupal_hash_salt']);
+    $actual = commerce_gdpr_anonymize_value($value, array(
+      'type' => 'hash',
+    ));
+    $this->assertEqual($expected, $actual, 'Is the input hashed?');
+
+    $actual = commerce_gdpr_anonymize_value($value, array(
+      'type' => 'clear',
+    ));
+    $this->assertEqual(0, $actual, 'Is the input cleared?');
+  }
+
+}
+
+/**
+ * Includes tests for the most important functions of the module.
+ *
+ * @see DrupalUnitTestCase
+ *
+ * @ingroup commerce_gdpr
+ */
+class CommerceGdprFunctionalTestCase extends CommerceBaseTestCase {
+
+  protected $profile = 'minimal';
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function getInfo() {
+    return array(
+      'name' => 'Commerce GDPR functional tests',
+      'description' => 'Test proper operation of key Commerce GPR functions.',
+      'group' => 'Drupal Commerce',
+    );
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function setUp() {
+    // We call parent::setUp() with the list of modules we want to enable.
+    $modules = parent::setUpHelper('all');
+    $modules[] = 'commerce_gdpr';
+    parent::setUp($modules);
+    $GLOBALS['drupal_hash_salt'] = hash('md5', mt_rand());
+    $this->example_value = 'example value';
+    $this->expected = hash_hmac('md5', $this->example_value, $GLOBALS['drupal_hash_salt']);
+  }
+
+  /**
+   * Order anonymization test.
+   */
+  protected function orderAnonymizationTest() {
+    $order = new stdClass();
+    $order->order_id = 1;
+    $order->type = 'commerce_order';
+    $order->status = 'pending';
+    $order->created = REQUEST_TIME;
+    $order->uid = 1;
+    $order->revision_id = 1;
+    $order->hostname = $this->example_value;
+    $order->mail = $this->example_value;
+
+    commerce_gdpr_anonymize_entity('commerce_order', $order);
+
+    $this->assertEqual($this->expected, $order->mail, 'Is the order mail anonymized properly?');
+  }
+
+  /**
+   * Customer profile anonymization test.
+   *
+   * Tests if entity field values are anonymized.
+   */
+  protected function profileAnonymizationTest() {
+    $profile = new stdClass();
+    $profile->profile_id = 1;
+    $profile->type = 'billing';
+    $profile->commerce_customer_address = array(
+      LANGUAGE_NONE => array(
+        array(
+          'name_line' => $this->example_value,
+        ),
+      ),
+    );
+    $fields = array(
+      'commerce_customer_address' => 'commerce_customer_address',
+    );
+    commerce_gdpr_anonymize_entity('commerce_customer_profile', $profile, $fields);
+
+    $this->assertEqual($this->expected, $profile->commerce_customer_address[LANGUAGE_NONE][0]['name_line'], 'Is the customer profile name_line address field item anonymized properly?');
+  }
+
+  /**
+   * Kernel tests for the module.
+   *
+   * The included tests can be run on the same environment,
+   * so they are placed in one method to save execution time.
+   */
+  public function testAnonymizeEntityFunction() {
+
+    $this->orderAnonymizationTest();
+    $this->profileAnonymizationTest();
+  }
+
+  /**
+   * Test the user anonymization path.
+   */
+  public function testUserAnonymization() {
+    $store_customer = $this->createStoreCustomer();
+
+    $admin_permissions = $this->permissionBuilder(array('site admin', 'store admin'));
+    $admin_permissions[] = 'anonymize other users data';
+    $admin_permissions[] = 'administer commerce gdpr';
+    $store_admin = $this->drupalCreateUser($admin_permissions);
+
+    $this->drupalLogin($store_admin);
+
+    // Open module settings page.
+    $this->drupalGet('admin/commerce/config/commerce-gdpr');
+    $this->assertResponse(200, t('The module config page opens.'));
+
+    $order = commerce_order_new($store_customer->uid);
+    $product = $this->createDummyProduct('PROD-01', 'Product One');
+    $profile = $this->createDummyCustomerProfile('billing', $store_customer->uid);
+    $order->commerce_line_items = array(
+      LANGUAGE_NONE => array(
+        array('line_item_id' => $product->product_id),
+      ),
+    );
+    $order->commerce_customer_billing = array(
+      LANGUAGE_NONE => array(
+        array('profile_id' => $profile->profile_id),
+      ),
+    );
+    $order->mail = 'example@example.com';
+    $order->status = 'completed';
+    commerce_order_save($order);
+
+    // Test with direct processing.
+    variable_set('commerce_gdpr_direct_processing', 1);
+
+    // Set user profile field.
+    variable_set('commerce_gdpr_anonymized_fields', array(
+      'commerce_customer_profile' => array(
+        'billing' => array(
+          'commerce_customer_address' => 'commerce_customer_address',
+        ),
+      ),
+    ));
+
+    // Check if the anonymize button displays.
+    $this->drupalGet('user/' . $store_customer->uid);
+    $this->assertField('edit-invoke-confirm', t('Anonymize account button exists'));
+
+    // Anonymize the test user using the bulk user form.
+    $this->drupalPost('admin/people', array(
+      'operation' => 'anonymize',
+      'accounts[' . $store_customer->uid . ']' => $store_customer->uid,
+    ), t('Update'));
+    $this->drupalPost(NULL, array(), t('Anonymize accounts'));
+
+    // Assert if all the fields are anonymized.
+    $anonymized_order = commerce_order_load($order->order_id);
+    $expected = commerce_gdpr_anonymize_value($order->mail, array(
+      'type' => 'hash',
+    ));
+    $this->assertEqual($anonymized_order->mail, $expected, t('Order email property has been anonymized'));
+
+    $anonymized_profile = commerce_customer_profile_load($profile->profile_id);
+    $raw_value = $profile->commerce_customer_address[LANGUAGE_NONE][0]['name_line'];
+    $expected = commerce_gdpr_anonymize_value($raw_value, array(
+      'type' => 'hash',
+    ));
+    $this->assertEqual($anonymized_profile->commerce_customer_address[LANGUAGE_NONE][0]['name_line'], $expected, t('Profile name field has been anonymized'));
+
+    $anonymized_user = user_load($store_customer->uid);
+    $expected = commerce_gdpr_anonymize_value($store_customer->mail, array(
+      'type' => 'hash',
+    ));
+    $this->assertEqual($anonymized_user->mail, $expected, t('User e-mail property has been anonymized'));
+  }
+
+}
