@@ -26,6 +26,17 @@ function commerce_gdpr_admin_form($form, &$form_state) {
     '#description' => t('Enter number of days after which inactive data will be anonymized, 0 - no automatic anonymization.'),
   );
 
+  $roles = user_roles(TRUE);
+  if (!empty($roles)) {
+    $form['excluded_roles'] = array(
+      '#type' => 'checkboxes',
+      '#options' => user_roles(TRUE),
+      '#title' => t('Excluded roles'),
+      '#default_value' => variable_get('commerce_gdpr_excluded_roles', array()),
+      '#description' => t('Select which roles should not be anonymized automatically (If data retention period > 0).'),
+    );
+  }
+
   $form['direct_processing'] = array(
     '#type' => 'checkbox',
     '#title' => t('Process items immediately'),
@@ -110,8 +121,8 @@ function commerce_gdpr_admin_form($form, &$form_state) {
  * Admin form validate handler.
  */
 function commerce_gdpr_admin_form_validate($form, &$form_state) {
-  if (!is_numeric($form_state['values']['data_retention'])) {
-    form_set_error('data_retention', t('Enter a valid data retention value.'));
+  if (!ctype_digit($form_state['values']['data_retention'])) {
+    form_set_error('data_retention', t('Enter a valid data retention value in days.'));
   }
 }
 
@@ -119,7 +130,10 @@ function commerce_gdpr_admin_form_validate($form, &$form_state) {
  * Admin form submit handler.
  */
 function commerce_gdpr_admin_form_submit($form, &$form_state) {
-  variable_set('commerce_gdpr_data_retention', $form_state['values']['data_retention']);
+  $last_retention = variable_get('commerce_gdpr_data_retention', 0);
+
+  variable_set('commerce_gdpr_data_retention', intval($form_state['values']['data_retention']));
+  variable_set('commerce_gdpr_excluded_roles', array_filter($form_state['values']['excluded_roles']));
   variable_set('commerce_gdpr_direct_processing', $form_state['values']['direct_processing']);
   variable_set('commerce_gdpr_user_button_text', $form_state['values']['user_button_text']);
 

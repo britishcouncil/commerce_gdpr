@@ -72,10 +72,16 @@ otherwise comparing data from before and after the change will be impossible.
 
 2. Admin UI
 
+To setup the module, go to /admin/commerce/config/commerce-gdpr.
+
+If automatic anonymization is required, set Order data retention period to
+a positive integer value. Also check roles that shouldn't be automatically
+anonymized.
+
 By default, only entity properties are anonimized and automatic anonimization
 is switched off. To select entity felds that should also be anonimized and
 time after automatic anonymization should take place, go to the module
-configuration form (/admin/commerce/config/commerce-gdpr).
+configuration form ().
 
 3. Custom entity properties
 

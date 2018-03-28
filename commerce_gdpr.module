@@ -635,11 +635,15 @@ function commerce_gdpr_cron_queue_info() {
     'worker callback' => 'commerce_gdpr_anonymization_worker',
     'time' => 30,
   );
+  $queues['commerce_gdpr_update_access'] = array(
+    'worker callback' => 'commerce_gdpr_update_access_worker',
+    'time' => 30,
+  );
   return $queues;
 }
 
 /**
- * Queue worker callback.
+ * Anonymization queue worker callback.
  */
 function commerce_gdpr_anonymization_worker($item) {
 
@@ -670,6 +674,48 @@ function commerce_gdpr_anonymization_worker($item) {
 }
 
 /**
+ * Last access update queue worker.
+ */
+function commerce_gdpr_update_access_worker($item) {
+  $query = db_select('users', 'u')->fields('u', array('uid', 'access'))->condition('uid', 1, '>');
+  $query->orderBy('uid', 'ASC');
+  $query->range($item['offset'], $item['limit']);
+  $results = $query->execute()->fetchAllKeyed();
+
+  foreach ($results as $uid => $last_access) {
+    // If this uid is already in the commerce_gdpr_access table - skip.
+    if (!db_select('commerce_gdpr_access', 'c')->fields('c', array('id'))->condition('type', 'user')->condition('id', $uid)->execute()->fetchField()) {
+
+      // Check if user orders and profiles haven't been updated after
+      // last access of the user.
+      $orders = commerce_order_load_multiple(array(), array('uid' => $uid));
+      foreach ($orders as $order) {
+        if ($order->changed > $last_access) {
+          $last_access = $order->changed;
+        }
+      }
+      $profiles = commerce_customer_profile_load_multiple(array(), array('uid' => $uid));
+      foreach ($profiles as $profile) {
+        if ($profile->changed > $last_access) {
+          $last_access = $profile->changed;
+        }
+      }
+
+      // User has no orders and never accessed the site.
+      if (!$last_access) {
+        $last_access = db_select('users', 'u')->fields('u', array('created'))->condition('uid', $uid)->execute()->fetchField();
+      }
+
+      db_insert('commerce_gdpr_access')->fields(array(
+        'type' => 'user',
+        'id' => $uid,
+        'last_access' => $last_access,
+      ))->execute();
+    }
+  }
+}
+
+/**
  * Implements hook_cron().
  */
 function commerce_gdpr_cron() {
@@ -693,10 +739,18 @@ function commerce_gdpr_cron() {
         return;
       }
 
-      // Add items to be processed in the next cron queue.
+      // Add items to be processed in the next cron queue if they shouldn't
+      // be skipped.
+      $excluded_roles = variable_get('commerce_gdpr_excluded_roles', array());
       foreach ($results as $item) {
         if ($item['type'] === 'user') {
           $account = user_load($item['id']);
+          foreach ($account->roles as $rid => $role_name) {
+            if (in_array($rid, $excluded_roles)) {
+              continue 2;
+            }
+          }
+
           $items = _commerce_gdpr_get_user_queue_items($account);
           foreach ($items as $item) {
             $queue->createItem($item);

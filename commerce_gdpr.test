@@ -86,14 +86,27 @@ class CommerceGdprFunctionalTestCase extends CommerceBaseTestCase {
   /**
    * {@inheritdoc}
    */
-  public function setUp() {
-    // We call parent::setUp() with the list of modules we want to enable.
-    $modules = parent::setUpHelper('all');
-    $modules[] = 'commerce_gdpr';
+  protected function setUpHelper($set = 'all', array $other_modules = array()) {
+    $modules = parent::setUpHelper($set, $other_modules);
     parent::setUp($modules);
-    $GLOBALS['drupal_hash_salt'] = hash('md5', mt_rand());
+
+    $this->store_customer = $this->createStoreCustomer();
+    $admin_permissions = $this->permissionBuilder(array('site admin', 'store admin'));
+    $admin_permissions[] = 'anonymize other users data';
+    $admin_permissions[] = 'administer commerce gdpr';
+    $this->store_admin = $this->drupalCreateUser($admin_permissions);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function setUp() {
+    $this->setUpHelper('all', array('commerce_gdpr'));
+
     $this->example_value = 'example value';
     $this->expected = hash_hmac('md5', $this->example_value, $GLOBALS['drupal_hash_salt']);
+
+    $this->drupalLogin($this->store_admin);
   }
 
   /**
@@ -155,22 +168,13 @@ class CommerceGdprFunctionalTestCase extends CommerceBaseTestCase {
    * Test the user anonymization path.
    */
   public function testUserAnonymization() {
-    $store_customer = $this->createStoreCustomer();
-
-    $admin_permissions = $this->permissionBuilder(array('site admin', 'store admin'));
-    $admin_permissions[] = 'anonymize other users data';
-    $admin_permissions[] = 'administer commerce gdpr';
-    $store_admin = $this->drupalCreateUser($admin_permissions);
-
-    $this->drupalLogin($store_admin);
-
     // Open module settings page.
     $this->drupalGet('admin/commerce/config/commerce-gdpr');
     $this->assertResponse(200, t('The module config page opens.'));
 
-    $order = commerce_order_new($store_customer->uid);
+    $order = commerce_order_new($this->store_customer->uid);
     $product = $this->createDummyProduct('PROD-01', 'Product One');
-    $profile = $this->createDummyCustomerProfile('billing', $store_customer->uid);
+    $profile = $this->createDummyCustomerProfile('billing', $this->store_customer->uid);
     $order->commerce_line_items = array(
       LANGUAGE_NONE => array(
         array('line_item_id' => $product->product_id),
@@ -198,32 +202,36 @@ class CommerceGdprFunctionalTestCase extends CommerceBaseTestCase {
     ));
 
     // Check if the anonymize button displays.
-    $this->drupalGet('user/' . $store_customer->uid);
+    $this->drupalGet('user/' . $this->store_customer->uid);
     $this->assertField('edit-invoke-confirm', t('Anonymize account button exists'));
 
     // Anonymize the test user using the bulk user form.
-    $this->drupalPost('admin/people', array(
+    $output = $this->drupalPost('admin/people', array(
       'operation' => 'anonymize',
-      'accounts[' . $store_customer->uid . ']' => $store_customer->uid,
+      'accounts[' . $this->store_customer->uid . ']' => $this->store_customer->uid,
     ), t('Update'));
+
     $this->drupalPost(NULL, array(), t('Anonymize accounts'));
+    $this->drupalGet('admin/people');
 
     // Assert if all the fields are anonymized.
-    $anonymized_order = commerce_order_load($order->order_id);
+    $entities = commerce_order_load_multiple(array($order->order_id), array(), TRUE);
+    $anonymized_order = reset($entities);
     $expected = commerce_gdpr_anonymize_value($order->mail, array(
       'type' => 'hash',
     ));
     $this->assertEqual($anonymized_order->mail, $expected, t('Order email property has been anonymized'));
 
-    $anonymized_profile = commerce_customer_profile_load($profile->profile_id);
+    $entities = commerce_customer_profile_load_multiple(array($profile->profile_id), array(), TRUE);
+    $anonymized_profile = reset($entities);
     $raw_value = $profile->commerce_customer_address[LANGUAGE_NONE][0]['name_line'];
     $expected = commerce_gdpr_anonymize_value($raw_value, array(
       'type' => 'hash',
     ));
     $this->assertEqual($anonymized_profile->commerce_customer_address[LANGUAGE_NONE][0]['name_line'], $expected, t('Profile name field has been anonymized'));
 
-    $anonymized_user = user_load($store_customer->uid);
-    $expected = commerce_gdpr_anonymize_value($store_customer->mail, array(
+    $anonymized_user = user_load($this->store_customer->uid, TRUE);
+    $expected = commerce_gdpr_anonymize_value($this->store_customer->mail, array(
       'type' => 'hash',
     ));
     $this->assertEqual($anonymized_user->mail, $expected, t('User e-mail property has been anonymized'));
