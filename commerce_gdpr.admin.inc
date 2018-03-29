@@ -130,8 +130,6 @@ function commerce_gdpr_admin_form_validate($form, &$form_state) {
  * Admin form submit handler.
  */
 function commerce_gdpr_admin_form_submit($form, &$form_state) {
-  $last_retention = variable_get('commerce_gdpr_data_retention', 0);
-
   variable_set('commerce_gdpr_data_retention', intval($form_state['values']['data_retention']));
   variable_set('commerce_gdpr_excluded_roles', array_filter($form_state['values']['excluded_roles']));
   variable_set('commerce_gdpr_direct_processing', $form_state['values']['direct_processing']);
@@ -148,6 +146,10 @@ function commerce_gdpr_admin_form_submit($form, &$form_state) {
     }
   }
   variable_set('commerce_gdpr_anonymized_fields', $selected_fields);
+
+  if (variable_get('commerce_gdpr_excluded_roles', array()) !== $form['excluded_roles']['#default_value']) {
+    _commerce_gdpr_update_last_access();
+  }
 
   drupal_set_message(t('Settings saved.'));
 }

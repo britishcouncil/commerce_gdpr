@@ -47,17 +47,7 @@ function commerce_gdpr_schema() {
 function commerce_gdpr_enable() {
   // Update last access data for users so users created
   // when the module was disabled are also considered.
-  $query = db_select('users', 'u')->fields('u', array('uid', 'access'))->condition('uid', 1, '>');
-  $total = $query->countQuery()->execute()->fetchField();
-
-  $batch_size = 10;
-  $queue = DrupalQueue::get('commerce_gdpr_update_access');
-  for ($offset = 0; $offset < $total; $offset += $batch_size) {
-    $queue->createItem(array(
-      'offset' => $offset,
-      'limit' => $batch_size,
-    ));
-  }
+  _commerce_gdpr_update_last_access();
 }
 
 /**

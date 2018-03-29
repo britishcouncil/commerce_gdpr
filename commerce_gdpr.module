@@ -363,7 +363,7 @@ function _commerce_gdpr_get_user_queue_items($account) {
       $queue_items[] = array(
         'type' => 'commerce_order',
         'id' => $order->order_id,
-        'uid' => $uid,
+        'owner_uid' => $uid,
       );
     }
   }
@@ -375,7 +375,7 @@ function _commerce_gdpr_get_user_queue_items($account) {
       $queue_items[] = array(
         'type' => 'commerce_customer_profile',
         'id' => $profile->profile_id,
-        'uid' => $uid,
+        'owner_uid' => $uid,
       );
     }
   }
@@ -628,6 +628,27 @@ function commerce_gdpr_user_operations() {
 }
 
 /**
+ * Register update last access items.
+ */
+function _commerce_gdpr_update_last_access() {
+  // TODO: This can be optimized by using the excluded roles.
+  $query = db_select('users', 'u')->fields('u', array('uid', 'access'))->condition('uid', 1, '>');
+  $total = $query->countQuery()->execute()->fetchField();
+
+  $batch_size = 10;
+  $queue = DrupalQueue::get('commerce_gdpr_update_access');
+  // If there are items in this queue - delete them.
+  $queue->deleteQueue();
+
+  for ($offset = 0; $offset < $total; $offset += $batch_size) {
+    $queue->createItem(array(
+      'offset' => $offset,
+      'limit' => $batch_size,
+    ));
+  }
+}
+
+/**
  * Implements hook_cron_queue_info().
  */
 function commerce_gdpr_cron_queue_info() {
@@ -657,15 +678,15 @@ function commerce_gdpr_anonymization_worker($item) {
       commerce_gdpr_anonymize_entity($item['type'], $entity);
 
       // Optionally change ownership of the entity.
-      if (!empty($item['uid'])) {
+      if (!empty($item['owner_uid'])) {
         if ($item['type'] === 'commerce_customer_profile') {
           db_update('commerce_customer_profile')
-            ->fields(array('uid' => $item['uid']))
+            ->fields(array('uid' => $item['owner_uid']))
             ->condition('profile_id', $entity->profile_id)
             ->execute();
         }
         else {
-          $entity->uid = $item['uid'];
+          $entity->uid = $item['owner_uid'];
           entity_metadata_wrapper($item['type'], $entity)->save();
         }
       }
@@ -747,6 +768,8 @@ function commerce_gdpr_cron() {
           $account = user_load($item['id']);
           foreach ($account->roles as $rid => $role_name) {
             if (in_array($rid, $excluded_roles)) {
+              // Prevent reprocessing the user in next cron runs and continue.
+              db_delete('commerce_gdpr_access')->condition('type', 'user')->condition('id', $item['id'])->execute();
               continue 2;
             }
           }
