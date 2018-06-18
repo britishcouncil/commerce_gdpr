@@ -631,8 +631,15 @@ function commerce_gdpr_user_operations() {
  * Register update last access items.
  */
 function _commerce_gdpr_update_last_access() {
-  // TODO: This can be optimized by using the excluded roles.
-  $query = db_select('users', 'u')->fields('u', array('uid', 'access'))->condition('uid', 1, '>');
+  $query = db_select('users', 'u')->fields('u', array('uid', 'access'))->condition('u.uid', 1, '>');
+
+  // If any roles are excluded, omit those users from our results.
+  $roles = variable_get('commerce_gdpr_excluded_roles', array());
+  if (!empty($roles)) {
+    $query->join('users_roles', 'ur', 'ur.uid = u.uid');
+    $query->condition('ur.rid', array_keys($roles), 'NOT IN');
+  }
+
   $total = $query->countQuery()->execute()->fetchField();
 
   $batch_size = 10;
